@@ -54,6 +54,9 @@ export interface ExtensionMessage {
 		| "browserToolEnabled"
 		| "browserConnectionResult"
 		| "remoteBrowserEnabled"
+		| "playAudio"
+		| "showErrorNotification"
+		| "ttsApiKeyStatus"
 	text?: string
 	action?:
 		| "chatButtonClicked"
@@ -90,6 +93,7 @@ export interface ExtensionMessage {
 	values?: Record<string, any>
 	requestId?: string
 	promptText?: string
+	status?: 'available' | 'unavailable'
 }
 
 export interface ApiConfigMeta {
@@ -153,6 +157,9 @@ export interface ExtensionState {
 	telemetryKey?: string
 	machineId?: string
 	showRooIgnoredFiles: boolean // Whether to show .rooignore'd files in listings
+	promptAutoEnhanceEnabled?: boolean // Whether to auto-enhance prompts before sending to AI
+	autoSpeakEnabled: boolean // Whether to automatically convert AI responses to speech
+	autoSpeakVoiceModel: string // The voice model to use for text-to-speech (e.g., "alloy", "echo")
 }
 
 export type { ClineMessage, ClineAsk, ClineSay }
@@ -222,3 +229,32 @@ export type ToolProgressStatus = {
 	icon?: string
 	text?: string
 }
+
+export type ExtensionMessageType =
+	| "state"
+	| "action"
+	| "selectedImages"
+	| "ollamaModels"
+	| "lmStudioModels"
+	| "theme"
+	| "workspaceUpdated"
+	| "playAudio"
+	| "openAiModels"
+	| "openRouterModels"
+	| "unstagedChanges"
+	| "unboundModels"
+	| "requestyModels"
+	| "glamaModels"
+	| "subtasks"
+	| "openAiCustomModelInfo"
+	| "imagePreview"
+	| "apiConfiguration"
+	| "currentApiConfigName"
+	| "listApiConfigMeta"
+	| "browserConnectionResponse"
+	| "languageModelChatCapabilities"
+	| "autoApprovalEnabled"
+	| "browserToolEnabled"
+	| "remoteBrowserEnabled"
+	| "ttsApiKeyStatus"
+	| "showErrorNotification"

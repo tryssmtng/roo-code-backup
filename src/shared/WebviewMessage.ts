@@ -1,12 +1,26 @@
 import { z } from "zod"
 import { ApiConfiguration, ApiProvider } from "./api"
 import { Mode, PromptComponent, ModeConfig } from "./modes"
+import * as vscode from "vscode"
 
 export type ClineAskResponse = "yesButtonClicked" | "noButtonClicked" | "messageResponse"
 
 export type PromptMode = Mode | "enhance"
 
 export type AudioType = "notification" | "celebration" | "progress_loop"
+
+// Define the missing types
+export interface EditText {
+	text: string
+	path: string
+	range?: { startLine: number; startColumn: number; endLine: number; endColumn: number }
+}
+
+export interface DiffText {
+	original: string
+	modified: string
+	path: string
+}
 
 export interface WebviewMessage {
 	type:
@@ -71,8 +85,11 @@ export interface WebviewMessage {
 		| "autoSpeakEnabled"
 		| "autoSpeakVoiceModel"
 		| "textToSpeech"
+		| "checkTtsApiKey"
 		| "playAudio"
+		| "playAudioThroughExtension"
 		| "storeSecret"
+		| "logError"
 		| "draggedImages"
 		| "deleteMessage"
 		| "terminalOutputLineLimit"
@@ -114,13 +131,14 @@ export interface WebviewMessage {
 		| "browserConnectionResult"
 		| "remoteBrowserEnabled"
 		| "language"
+		| "showErrorNotification"
 	text?: string
 	disabled?: boolean
 	askResponse?: ClineAskResponse
 	apiConfiguration?: ApiConfiguration
 	images?: string[]
 	bool?: boolean
-	value?: number
+	value?: string | number
 	commands?: string[]
 	audioType?: AudioType
 	serverName?: string
@@ -138,6 +156,21 @@ export interface WebviewMessage {
 	payload?: WebViewMessagePayload
 	source?: "global" | "project"
 	requestId?: string
+	theme?: "vs-dark" | "vs" | "hc-black"
+	name?: string
+	tabsContext?: boolean
+	editText?: EditText
+	diffText?: DiffText
+	codeAction?: string
+	rooIgnoreRules?: string[]
+	selectedRules?: string[]
+	command?: vscode.Command
+	viewStates?: Record<string, any>
+	systemPrompt?: string
+	checkpointId?: string
+	voiceModel?: string
+	audioData?: string // For passing audio data directly to the extension
+	key?: string // For storeSecret message type
 }
 
 export const checkoutDiffPayloadSchema = z.object({

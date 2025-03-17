@@ -75,6 +75,9 @@ export interface ExtensionStateContextType extends ExtensionState {
 	remoteBrowserEnabled?: boolean
 	setRemoteBrowserEnabled: (value: boolean) => void
 	machineId?: string
+	setPromptAutoEnhanceEnabled: (value: boolean) => void
+	setAutoSpeakEnabled: (value: boolean) => void
+	setAutoSpeakVoiceModel: (value: string) => void
 }
 
 export const ExtensionStateContext = createContext<ExtensionStateContextType | undefined>(undefined)
@@ -144,6 +147,9 @@ export const ExtensionStateContextProvider: React.FC<{ children: React.ReactNode
 		browserToolEnabled: true,
 		telemetrySetting: "unset",
 		showRooIgnoredFiles: true, // Default to showing .rooignore'd files with lock symbol (current behavior)
+		promptAutoEnhanceEnabled: false,
+		autoSpeakEnabled: false,
+		autoSpeakVoiceModel: "alloy",
 	})
 
 	const [didHydrateState, setDidHydrateState] = useState(false)
@@ -165,6 +171,14 @@ export const ExtensionStateContextProvider: React.FC<{ children: React.ReactNode
 			switch (message.type) {
 				case "state": {
 					const newState = message.state!
+					// Ensure auto-speak settings are always defined
+					if (newState.autoSpeakEnabled === undefined) {
+						newState.autoSpeakEnabled = false;
+					}
+					if (newState.autoSpeakVoiceModel === undefined) {
+						newState.autoSpeakVoiceModel = "alloy";
+					}
+					
 					setState((prevState) => mergeExtensionState(prevState, newState))
 					setShowWelcome(!checkExistKey(newState.apiConfiguration))
 					setDidHydrateState(true)

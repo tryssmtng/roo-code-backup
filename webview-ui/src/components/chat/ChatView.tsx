@@ -98,11 +98,68 @@ const ChatView = ({ isHidden, showAnnouncement, hideAnnouncement, showHistoryVie
 
 	const [wasStreaming, setWasStreaming] = useState<boolean>(false)
 	const [showCheckpointWarning, setShowCheckpointWarning] = useState<boolean>(false)
+	
+	// Add a temporary stub for groupedMessages to resolve TypeScript errors
+	// This will be overridden later by the actual implementation
+	const tempGroupedMessages: any[] = [];
+	const groupedMessagesRef = useRef<any[]>(tempGroupedMessages);
 
 	// UI layout depends on the last 2 messages
 	// (since it relies on the content of these messages, we are deep comparing. i.e. the button state after hitting button sets enableButtons to false, and this effect otherwise would have to true again even if messages didn't change
 	const lastMessage = useMemo(() => messages.at(-1), [messages])
 	const secondLastMessage = useMemo(() => messages.at(-2), [messages])
+
+	// Add these refs near the beginning of the component
+	const lastTtsRef = useRef<number>(0);
+	const ttsPlayedMessages = useRef<Set<string>>(new Set());
+	const [lastSpokenMessageIndex, setLastSpokenMessageIndex] = useState<number>(-1);
+	const lastSpokenContentRef = useRef<string>("");
+	
+	// Add new state to track if TTS is currently playing
+	const [isTtsSpeaking, setIsTtsSpeaking] = useState(false);
+	// Add a ref to track TTS request pending status
+	const ttsPendingRef = useRef<boolean>(false);
+	// Add ref to track current streaming message content for real-time TTS
+	const streamingContentRef = useRef<string>("");
+	// Add ref to track the last TTS chunk sent for streaming
+	const lastTtsSentChunkRef = useRef<string>("");
+	// Add throttle timer ref to avoid too many TTS requests
+	const ttsThrottleTimerRef = useRef<any>(null);
+
+	// Add speech enhancements for better natural flow
+	const addSpeechEnhancements = (text: string): string => {
+		// Make the text sound more natural with conversational adjustments
+		
+		// Format contractions without spaces (couldn't vs could n't)
+		let enhancedText = text
+			.replace(/(\w+) n't/g, "$1n't")
+			
+			// Ensure natural pauses with proper punctuation spacing
+			.replace(/([.!?])(\S)/g, '$1 $2')
+			
+			// Add subtle pauses for commas
+			.replace(/,([^\s])/g, ', $1')
+			
+			// Remove excessive spaces
+			.replace(/\s+/g, ' ')
+			
+			// Add more human-like speech patterns with interjections
+			.replace(/([.!?]) (But|And|So|Because|However)/g, '$1 ... $2')
+			
+			// Make questions sound more natural
+			.replace(/\?(\s*[A-Z])/g, '? ... $1')
+			
+			// Add emphasis to important words
+			.replace(/(important|critical|essential|necessary|crucial|vital)/gi, ' $1 ')
+			
+			// Clean up any double spaces from our replacements
+			.replace(/\s+/g, ' ')
+			.trim();
+			
+		console.log("Enhanced TTS text with more natural patterns");
+		
+		return enhancedText;
+	};
 
 	function playSound(audioType: AudioType) {
 		vscode.postMessage({ type: "playSound", audioType })
@@ -706,156 +763,259 @@ const ChatView = ({ isHidden, showAnnouncement, hideAnnouncement, showHistoryVie
 		],
 	)
 
+	// Real-time streaming TTS implementation - speaks as content is generated
 	useEffect(() => {
-		// Only execute when isStreaming changes from true to false
-		if (wasStreaming && !isStreaming && lastMessage) {
-			// Play appropriate sound based on lastMessage content
-			if (lastMessage.type === "ask") {
-				// Don't play sounds for auto-approved actions
-				if (!isAutoApproved(lastMessage)) {
-					switch (lastMessage.ask) {
-						case "api_req_failed":
-						case "mistake_limit_reached":
-							playSound("progress_loop")
-							break
-						case "followup":
-							if (!lastMessage.partial) {
-								playSound("notification")
-							}
-							break
-						case "tool":
-						case "browser_action_launch":
-						case "resume_task":
-						case "use_mcp_server":
-							playSound("notification")
-							break
-						case "completion_result":
-						case "resume_completed_task":
-							playSound("celebration")
-							break
-					}
-				}
-			} else if (lastMessage.type === "say" && lastMessage.say === "text" && autoSpeakEnabled) {
-				// Use TTS for AI responses if AutoSpeak is enabled and text is conversational
-				if (lastMessage.text && typeof lastMessage.text === 'string') {
-					// Check if the text is conversational (not code or technical output)
-					const isConversational = (text: string): boolean => {
-						// Check if the text contains code blocks or appears to be technical output
-						const codeBlockRegex = /```[\s\S]*?```/
-						const technicalPatterns = [
-							/^import\s+[\w\s,{}]+\s+from\s+['"][\w\-./]+['"]/,  // import statements
-							/^const\s+[\w\s,{}]+\s+=\s+/,                       // const declarations
-							/^let\s+[\w\s,{}]+\s+=\s+/,                         // let declarations
-							/^var\s+[\w\s,{}]+\s+=\s+/,                         // var declarations
-							/^function\s+\w+\s*\(/,                             // function declarations
-							/^class\s+\w+/,                                     // class declarations
-							/^\s*<[\w\-]+[^>]*>/,                               // HTML tags
-							/^\s*\{[\s\S]*?\}\s*$/,                             // JSON objects
-							/^\s*\[[\s\S]*?\]\s*$/,                             // JSON arrays
-						]
+		// Only process when auto-speak is enabled and we have messages
+		if (!autoSpeakEnabled || modifiedMessages.length === 0) return;
 
-						if (codeBlockRegex.test(text)) {
-							return false
-						}
+		// Get the most recent message that's still streaming
+		const streamingMessage = isStreaming ? modifiedMessages.at(-1) : null;
+		if (!streamingMessage || streamingMessage.partial !== true) return;
 
-						for (const pattern of technicalPatterns) {
-							if (pattern.test(text)) {
-								return false
-							}
-						}
+		// Skip if it's not a suitable message type for TTS
+		if (
+			!(streamingMessage.type === "say" && (
+				streamingMessage.say === "text" ||
+				streamingMessage.say === "completion_result" ||
+				streamingMessage.say?.includes("task_completed")
+			))
+		) {
+			console.log(`TTS Streaming - Skipping message with type ${streamingMessage.type}/${streamingMessage.say}`);
+			return;
+		}
 
-						return true
-					}
+		// Get the current text content
+		const currentText = streamingMessage.text || "";
+		if (currentText.length < 5) return; // Too short to speak
 
-					if (isConversational(lastMessage.text)) {
-						vscode.postMessage({ 
-							type: "textToSpeech", 
-							text: lastMessage.text,
-							voiceModel: autoSpeakVoiceModel || "alloy"
-						})
-					}
-				}
+		// Compare with previous content to find new text to speak
+		const previousContent = streamingContentRef.current;
+		streamingContentRef.current = currentText;
+
+		// If no new content or currently speaking, don't proceed
+		if (previousContent === currentText || isTtsSpeaking) return;
+
+		// Find new content to speak (what was added since last update)
+		let newContent = "";
+		if (previousContent.length === 0) {
+			// First chunk - wait for a reasonable amount of text
+			if (currentText.length < 30) return;
+			newContent = currentText;
+		} else {
+			// Get only the new content that was added
+			newContent = currentText.substring(previousContent.length);
+		}
+
+		// Skip if new content is too short or already spoken
+		if (newContent.length < 20 || newContent === lastTtsSentChunkRef.current) return;
+
+		// Check if this content contains a complete sentence
+		const sentenceEndRegex = /[.!?]\s*$/;
+		const hasCompleteSentence = sentenceEndRegex.test(newContent);
+
+		// Only speak complete sentences or substantial chunks
+		if (!hasCompleteSentence && newContent.length < 50) {
+			console.log(`TTS Streaming - Waiting for complete sentence, current chunk: ${newContent.length} chars`);
+			return;
+		}
+
+		// Throttle TTS requests to avoid overloading
+		if (ttsThrottleTimerRef.current) {
+			clearTimeout(ttsThrottleTimerRef.current);
+		}
+
+		ttsThrottleTimerRef.current = setTimeout(() => {
+			// Skip technical content
+			if (
+				newContent.includes('```') || 
+				newContent.startsWith('import ') ||
+				newContent.startsWith('export ') ||
+				newContent.startsWith('function ') ||
+				newContent.startsWith('const ') ||
+				newContent.startsWith('let ')
+			) {
+				console.log(`TTS Streaming - Skipping technical content`);
+				return;
 			}
-		}
-		// Update previous value
-		setWasStreaming(isStreaming)
-	}, [isStreaming, lastMessage, wasStreaming, isAutoApproved, autoSpeakEnabled, autoSpeakVoiceModel])
 
-	const isBrowserSessionMessage = (message: ClineMessage): boolean => {
-		// which of visible messages are browser session messages, see above
-		if (message.type === "ask") {
-			return ["browser_action_launch"].includes(message.ask!)
-		}
-		if (message.type === "say") {
-			return ["api_req_started", "text", "browser_action", "browser_action_result"].includes(message.say!)
-		}
-		return false
-	}
+			console.log(`TTS Streaming - Speaking new content (${newContent.length} chars)`);
+			lastTtsSentChunkRef.current = newContent;
+			setIsTtsSpeaking(true);
 
-	const groupedMessages = useMemo(() => {
-		const result: (ClineMessage | ClineMessage[])[] = []
-		let currentGroup: ClineMessage[] = []
-		let isInBrowserSession = false
+			// Enhance text for better TTS quality
+			const enhancedText = addSpeechEnhancements(newContent);
 
-		const endBrowserSession = () => {
-			if (currentGroup.length > 0) {
-				result.push([...currentGroup])
-				currentGroup = []
-				isInBrowserSession = false
-			}
-		}
+			// Send to extension for speech
+			vscode.postMessage({ 
+				type: "textToSpeech", 
+				text: enhancedText,
+				voiceModel: autoSpeakVoiceModel || "alloy"
+			});
 
-		visibleMessages.forEach((message) => {
-			if (message.ask === "browser_action_launch") {
-				// complete existing browser session if any
-				endBrowserSession()
-				// start new
-				isInBrowserSession = true
-				currentGroup.push(message)
-			} else if (isInBrowserSession) {
-				// end session if api_req_started is cancelled
-
-				if (message.say === "api_req_started") {
-					// get last api_req_started in currentGroup to check if it's cancelled. If it is then this api req is not part of the current browser session
-					const lastApiReqStarted = [...currentGroup].reverse().find((m) => m.say === "api_req_started")
-					if (lastApiReqStarted?.text !== null && lastApiReqStarted?.text !== undefined) {
-						const info = JSON.parse(lastApiReqStarted.text)
-						const isCancelled = info.cancelReason !== null && info.cancelReason !== undefined
-						if (isCancelled) {
-							endBrowserSession()
-							result.push(message)
-							return
-						}
-					}
+			// Set up completion handler
+			const handleTtsComplete = (event: MessageEvent) => {
+				const message = event.data;
+				if (
+					(message.type === "logError" && message.text === "Audio playback complete") ||
+					message.type === "playAudio"
+				) {
+					window.removeEventListener("message", handleTtsComplete);
+					setIsTtsSpeaking(false);
 				}
+			};
 
-				if (isBrowserSessionMessage(message)) {
-					currentGroup.push(message)
+			window.addEventListener("message", handleTtsComplete);
 
-					// Check if this is a close action
-					if (message.say === "browser_action") {
-						const browserAction = JSON.parse(message.text || "{}") as ClineSayBrowserAction
-						if (browserAction.action === "close") {
-							endBrowserSession()
+			// Safety timeout
+			setTimeout(() => {
+				window.removeEventListener("message", handleTtsComplete);
+				setIsTtsSpeaking(false);
+			}, 10000);
+		}, 250); // Small delay to collect more text and avoid too frequent requests
+	}, [modifiedMessages, isStreaming, autoSpeakEnabled, autoSpeakVoiceModel, isTtsSpeaking]);
+
+	// Also keep the original completed-message TTS for when streaming finishes
+	useEffect(() => {
+		// Only attempt TTS when we have messages, auto-speak is enabled, and not currently speaking or pending
+		if (modifiedMessages.length > 0 && autoSpeakEnabled && !isTtsSpeaking && !ttsPendingRef.current) {
+			// Get the most recent complete message (not streaming)
+			const latestMessage = modifiedMessages[modifiedMessages.length - 1];
+			const isLastMessageStreaming = isStreaming && modifiedMessages.at(-1)?.partial === true;
+			
+			// Only process completed messages, not streaming ones
+			if (!isLastMessageStreaming && latestMessage) {
+				// Detailed logging to debug the message state
+				console.log(`TTS Debug - Processing message: type=${latestMessage?.type}, say=${latestMessage?.say}, text length=${latestMessage?.text?.length || 0}`);
+				
+				// Enhanced checks for valid speech content
+				if (
+					latestMessage &&
+					latestMessage.text && 
+					typeof latestMessage.text === 'string' && 
+					(
+						(latestMessage.type === "say" && (
+							latestMessage.say === "text" || 
+							latestMessage.say === "completion_result" ||
+							// Check for task completed message in a way that doesn't trigger type errors
+							(latestMessage.say && latestMessage.say.includes("task_completed"))
+						)) ||
+						(latestMessage.type === "ask" && latestMessage.text.trim().length > 0)
+					)
+				) {
+					// Generate a unique ID for this message
+					const messageId = `${latestMessage.type}_${latestMessage.say || ''}_${latestMessage.ts}`;
+					
+					// Check if this is new content to avoid duplicates
+					if (!ttsPlayedMessages.current.has(messageId)) {
+						console.log(`TTS Debug - Processing message for speech`);
+						
+						// Text preprocessing for better TTS quality
+						const rawContent = latestMessage.text.trim();
+						
+						// Don't process if too short
+						if (rawContent.length <= 3) {
+							console.log(`TTS Debug - Message too short for TTS: ${rawContent}`);
+							return;
 						}
+						
+						// Skip technical content that doesn't make sense to speak
+						if (
+							rawContent.includes('```') || // code blocks
+							rawContent.startsWith('import ') ||
+							rawContent.startsWith('export ') ||
+							rawContent.startsWith('function ') ||
+							rawContent.startsWith('const ') ||
+							rawContent.startsWith('let ') ||
+							rawContent.startsWith('var ') ||
+							rawContent.includes('<script') ||
+							rawContent.includes('</script>')
+						) {
+							console.log(`TTS Debug - Skipping technical content not suitable for TTS`);
+							return;
+						}
+						
+						console.log(`TTS Debug - Speaking full message content`);
+						
+						// Mark as speaking and pending to prevent overlap
+						setIsTtsSpeaking(true);
+						ttsPendingRef.current = true;
+						
+						// Add to played messages set to avoid duplicates
+						ttsPlayedMessages.current.add(messageId);
+						
+						// Prepare full text with basic enhancements
+						const enhancedText = addSpeechEnhancements(rawContent);
+						
+						try {
+							// Send to extension for speech (full message at once)
+							console.log(`TTS Debug - Sending textToSpeech message to extension with ${enhancedText.length} characters`);
+							vscode.postMessage({ 
+								type: "textToSpeech", 
+								text: enhancedText,
+								voiceModel: autoSpeakVoiceModel || "alloy"
+							});
+							
+							// Listen for TTS completion or audio playback events from extension
+							const handleTtsComplete = (event: MessageEvent) => {
+								const message = event.data;
+								// Check for completion message
+								if (
+									(message.type === "logError" && message.text === "Audio playback complete") ||
+									(message.type === "playAudio" && message.text) // The audio data was sent back
+								) {
+									console.log(`TTS Debug - Speech completed or audio data received`);
+									if (message.type === "playAudio") {
+										// If we receive audio data, assume it will play and remove the pending flag
+										console.log(`TTS Debug - Audio data received, length: ${message.text?.length || 0}`);
+										ttsPendingRef.current = false;
+										// Note: keep isTtsSpeaking true until playback completes
+									} else {
+										// If we receive completion message, remove all flags
+										console.log(`TTS Debug - Received playback complete message`);
+										window.removeEventListener("message", handleTtsComplete);
+										setIsTtsSpeaking(false);
+										ttsPendingRef.current = false;
+									}
+								}
+							};
+							
+							window.addEventListener("message", handleTtsComplete);
+							
+							// Safety timeout in case completion event never arrives
+							setTimeout(() => {
+								console.log(`TTS Debug - Watchdog timer fired for speech`);
+								window.removeEventListener("message", handleTtsComplete);
+								setIsTtsSpeaking(false);
+								ttsPendingRef.current = false;
+							}, 30000); // Longer timeout for full messages
+						} catch (error) {
+							console.log(`TTS Debug - Error sending TTS message: ${error}`);
+							setIsTtsSpeaking(false);
+							ttsPendingRef.current = false;
+						}
+					} else {
+						console.log(`TTS Debug - Skipping already spoken message: ${messageId}`);
 					}
 				} else {
-					// complete existing browser session if any
-					endBrowserSession()
-					result.push(message)
+					// Log why the message wasn't spoken
+					if (!latestMessage) {
+						console.log(`TTS Debug - No message available`);
+					} else if (!latestMessage.text || typeof latestMessage.text !== 'string') {
+						console.log(`TTS Debug - Message has no text content`);
+					} else {
+						console.log(`TTS Debug - Message type/say not supported for TTS: ${latestMessage.type}/${latestMessage.say}`);
+					}
 				}
-			} else {
-				result.push(message)
+			} else if (isLastMessageStreaming) {
+				console.log("TTS Debug - Skipping streaming message, waiting for completion");
 			}
-		})
-
-		// Handle case where browser session is the last group
-		if (currentGroup.length > 0) {
-			result.push([...currentGroup])
 		}
+	}, [modifiedMessages, autoSpeakEnabled, autoSpeakVoiceModel, isTtsSpeaking, isStreaming]);
 
-		return result
-	}, [visibleMessages])
+	// Update wasStreaming when streaming state changes
+	useEffect(() => {
+		setWasStreaming(isStreaming);
+	}, [isStreaming]);
 
 	// scrolling
 
@@ -885,9 +1045,10 @@ const ChatView = ({ isHidden, showAnnouncement, hideAnnouncement, showHistoryVie
 	const toggleRowExpansion = useCallback(
 		(ts: number) => {
 			const isCollapsing = expandedRows[ts] ?? false
-			const lastGroup = groupedMessages.at(-1)
+			const messages = groupedMessagesRef.current;
+			const lastGroup = messages.at(-1)
 			const isLast = Array.isArray(lastGroup) ? lastGroup[0].ts === ts : lastGroup?.ts === ts
-			const secondToLastGroup = groupedMessages.at(-2)
+			const secondToLastGroup = messages.at(-2)
 			const isSecondToLast = Array.isArray(secondToLastGroup)
 				? secondToLastGroup[0].ts === ts
 				: secondToLastGroup?.ts === ts
@@ -925,7 +1086,7 @@ const ChatView = ({ isHidden, showAnnouncement, hideAnnouncement, showHistoryVie
 				} else {
 					const timer = setTimeout(() => {
 						virtuosoRef.current?.scrollToIndex({
-							index: groupedMessages.length - (isLast ? 1 : 2),
+							index: messages.length - (isLast ? 1 : 2),
 							align: "start",
 						})
 					}, 0)
@@ -933,7 +1094,7 @@ const ChatView = ({ isHidden, showAnnouncement, hideAnnouncement, showHistoryVie
 				}
 			}
 		},
-		[groupedMessages, expandedRows, scrollToBottomAuto, isAtBottom],
+		[expandedRows, scrollToBottomAuto, isAtBottom],
 	)
 
 	const handleRowHeightChange = useCallback(
@@ -958,7 +1119,7 @@ const ChatView = ({ isHidden, showAnnouncement, hideAnnouncement, showHistoryVie
 			}, 50)
 			// return () => clearTimeout(timer) // dont cleanup since if visibleMessages.length changes it cancels.
 		}
-	}, [groupedMessages.length, scrollToBottomSmooth])
+	}, [groupedMessagesRef.current.length, scrollToBottomSmooth])
 
 	const handleWheel = useCallback((event: Event) => {
 		const wheelEvent = event as WheelEvent
@@ -1025,7 +1186,7 @@ const ChatView = ({ isHidden, showAnnouncement, hideAnnouncement, showHistoryVie
 				return (
 					<BrowserSessionRow
 						messages={messageOrGroup}
-						isLast={index === groupedMessages.length - 1}
+						isLast={index === messages.length - 1}
 						lastModifiedMessage={modifiedMessages.at(-1)}
 						onHeightChange={handleRowHeightChange}
 						isStreaming={isStreaming}
@@ -1049,7 +1210,7 @@ const ChatView = ({ isHidden, showAnnouncement, hideAnnouncement, showHistoryVie
 					isExpanded={expandedRows[messageOrGroup.ts] || false}
 					onToggleExpand={() => toggleRowExpansion(messageOrGroup.ts)}
 					lastModifiedMessage={modifiedMessages.at(-1)}
-					isLast={index === groupedMessages.length - 1}
+					isLast={index === messages.length - 1}
 					onHeightChange={handleRowHeightChange}
 					isStreaming={isStreaming}
 				/>
@@ -1057,8 +1218,7 @@ const ChatView = ({ isHidden, showAnnouncement, hideAnnouncement, showHistoryVie
 		},
 		[
 			expandedRows,
-			modifiedMessages,
-			groupedMessages.length,
+			messages,
 			handleRowHeightChange,
 			isStreaming,
 			toggleRowExpansion,
@@ -1129,6 +1289,96 @@ const ChatView = ({ isHidden, showAnnouncement, hideAnnouncement, showHistoryVie
 			window.removeEventListener("keydown", handleKeyDown)
 		}
 	}, [handleKeyDown])
+
+	// Reset TTS state when task changes
+	useEffect(() => {
+		console.log(`TTS Debug - Reset TTS state due to task change`);
+		setIsTtsSpeaking(false);
+		ttsPendingRef.current = false;
+		ttsPlayedMessages.current.clear();
+		lastSpokenContentRef.current = "";
+		streamingContentRef.current = "";
+		lastTtsSentChunkRef.current = "";
+	}, [task]);
+
+	const isBrowserSessionMessage = (message: ClineMessage): boolean => {
+		// which of visible messages are browser session messages, see above
+		if (message.type === "ask") {
+			return ["browser_action_launch"].includes(message.ask!)
+		}
+		if (message.type === "say") {
+			return ["api_req_started", "text", "browser_action", "browser_action_result"].includes(message.say!)
+		}
+		return false
+	}
+
+	// Initialize groupedMessages and update the ref when it changes
+	const groupedMessages = useMemo(() => {
+		const result: (ClineMessage | ClineMessage[])[] = []
+		let currentGroup: ClineMessage[] = []
+		let isInBrowserSession = false
+
+		const endBrowserSession = () => {
+			if (currentGroup.length > 0) {
+				result.push([...currentGroup])
+				currentGroup = []
+				isInBrowserSession = false
+			}
+		}
+
+		visibleMessages.forEach((message) => {
+			if (message.ask === "browser_action_launch") {
+				// complete existing browser session if any
+				endBrowserSession()
+				// start new
+				isInBrowserSession = true
+				currentGroup.push(message)
+			} else if (isInBrowserSession) {
+				// end session if api_req_started is cancelled
+
+				if (message.say === "api_req_started") {
+					// get last api_req_started in currentGroup to check if it's cancelled. If it is then this api req is not part of the current browser session
+					const lastApiReqStarted = [...currentGroup].reverse().find((m) => m.say === "api_req_started")
+					if (lastApiReqStarted?.text !== null && lastApiReqStarted?.text !== undefined) {
+						const info = JSON.parse(lastApiReqStarted.text)
+						const isCancelled = info.cancelReason !== null && info.cancelReason !== undefined
+						if (isCancelled) {
+							endBrowserSession()
+							result.push(message)
+							return
+						}
+					}
+				}
+
+				if (isBrowserSessionMessage(message)) {
+					currentGroup.push(message)
+
+					// Check if this is a close action
+					if (message.say === "browser_action") {
+						const browserAction = JSON.parse(message.text || "{}") as ClineSayBrowserAction
+						if (browserAction.action === "close") {
+							endBrowserSession()
+						}
+					}
+				} else {
+					// complete existing browser session if any
+					endBrowserSession()
+					result.push(message)
+				}
+			} else {
+				result.push(message)
+			}
+		})
+
+		// Handle case where browser session is the last group
+		if (currentGroup.length > 0) {
+			result.push([...currentGroup])
+		}
+
+		// Update the ref with the new value
+		groupedMessagesRef.current = result;
+		return result;
+	}, [visibleMessages])
 
 	return (
 		<div
